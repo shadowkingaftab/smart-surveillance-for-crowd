@@ -1,0 +1,1 @@
+This project is provided as a reference implementation. Review the licenses and terms of every dependency and pretrained model before commercial deployment, especially the selected Ultralytics model/license and DeepFace/model dependencies.

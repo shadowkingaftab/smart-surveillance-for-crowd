@@ -1,0 +1,16 @@
+face-api.js (vendored browser bundle)
+=====================================
+
+Package:  @vladmandic/face-api 1.7.15
+Upstream: https://github.com/vladmandic/face-api
+License:  MIT
+
+Files:
+  face-api.js                      UMD browser build (tfjs bundled)
+  models/tiny_face_detector_model-weights_manifest.json
+  models/tiny_face_detector_model.bin
+  models/face_expression_model-weights_manifest.json
+  models/face_expression_model.bin
+
+The live camera view loads these files from this folder only. All inference
+runs in the browser tab; frames are never uploaded to the API or stored.
