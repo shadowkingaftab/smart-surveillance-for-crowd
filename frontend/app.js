@@ -855,6 +855,13 @@
 
   const LIVE_EXPRESSIONS = ["neutral", "happy", "surprised", "sad", "angry", "fearful", "disgusted"];
   const LIVE_RED = new Set(["sad", "angry", "fearful", "disgusted"]);
+  // FER under-reports anger/upset on webcam faces (often splitting it with
+  // neutral), so negative cues are weighted to keep clear distress out of the
+  // green box without flipping genuinely calm faces.
+  const LIVE_WEIGHT = {
+    neutral: 1.0, happy: 0.9, surprised: 0.8,
+    angry: 1.8, fearful: 1.5, sad: 1.35, disgusted: 1.25,
+  };
   const LIVE_LABEL = {
     neutral: "Neutral", happy: "Happy", surprised: "Surprised",
     sad: "Sad", angry: "Angry", fearful: "Fearful", disgusted: "Disgusted",
@@ -875,6 +882,9 @@
     startToken: 0,
     options: null,
     smoothed: null,
+    smoothedAt: 0,
+    missedRuns: 0,
+    backend: null,
     lastResults: null,
     lastFacesAt: 0,
     fps: 0,
@@ -917,6 +927,9 @@
     await api.nets.tinyFaceDetector.loadFromUri(LIVE_MODELS_URI);
     await api.nets.faceExpressionNet.loadFromUri(LIVE_MODELS_URI);
     live.modelsReady = true;
+    live.backend = api.tf && api.tf.getBackend ? api.tf.getBackend() : "cpu";
+    const detector = $("#liveDetector");
+    if (detector) detector.textContent = live.backend === "webgl" ? "TinyFace · WebGL" : "TinyFace · CPU";
     setLiveBadge("ready", "On-device models ready");
   }
 
@@ -1048,8 +1061,10 @@
       }
 
       $("#liveStage").style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
-      live.options = new window.faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 });
+      live.options = new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.25 });
       live.smoothed = null;
+      live.smoothedAt = 0;
+      live.missedRuns = 0;
       live.lastResults = null;
       live.lastFacesAt = 0;
       live.fps = 0;
@@ -1063,7 +1078,9 @@
       resetLiveReadout({ idleText: "Looking for a face", idleClass: "idle" });
       $("#liveHudFaces").textContent = "0 faces";
       $("#liveHudFps").textContent = "—";
-      toast("Camera live · analysis stays on this device");
+      toast(live.backend === "cpu"
+        ? "Camera live · on-device CPU mode. Enable browser hardware acceleration for smoother tracking."
+        : "Camera live · analysis stays on this device");
       runLiveDetection(live.token);
     } catch (error) {
       if (!live.open || attempt !== live.startToken) {
@@ -1179,10 +1196,13 @@
         if (results.length) {
           live.lastResults = results;
           live.lastFacesAt = now;
-        } else if (live.lastResults && now - live.lastFacesAt < 800) {
+          live.missedRuns = 0;
+        } else if (live.lastResults && (live.missedRuns < 1 || now - live.lastFacesAt < 800)) {
+          live.missedRuns += 1;
           results = live.lastResults;
         } else {
           live.lastResults = null;
+          live.missedRuns = 0;
         }
 
         const elapsed = Math.max(1, now - started);
@@ -1216,7 +1236,7 @@
     let red = 0;
     let calm = 0;
     for (const key of LIVE_EXPRESSIONS) {
-      const value = expressions[key] || 0;
+      const value = (expressions[key] || 0) * (LIVE_WEIGHT[key] || 1);
       if (LIVE_RED.has(key)) red += value;
       else calm += value;
     }
@@ -1326,18 +1346,26 @@
     const primary = primaryFace(results || []);
     if (!primary) {
       live.smoothed = null;
+      live.smoothedAt = 0;
+      live.missedRuns = 0;
       $("#liveMood").textContent = "No face";
       setLiveState("idle", "Looking for a face");
       $("#liveExpressionBars").innerHTML = "";
       return;
     }
 
-    const alpha = 0.35;
+    // Time-aware smoothing: a fixed alpha would take several seconds to react
+    // on slow (CPU) machines at ~0.5 fps, so derive alpha from elapsed time --
+    // fast updates stay smooth, slow updates snap to the new read immediately.
+    const now = performance.now();
+    const dt = live.smoothedAt ? (now - live.smoothedAt) / 1000 : 0;
+    live.smoothedAt = now;
     const expressions = primary.expressions || {};
     if (!live.smoothed) {
       live.smoothed = {};
       for (const key of LIVE_EXPRESSIONS) live.smoothed[key] = expressions[key] || 0;
     } else {
+      const alpha = Math.min(1, 1 - Math.exp(-dt / 0.22));
       for (const key of LIVE_EXPRESSIONS) {
         live.smoothed[key] = live.smoothed[key] * (1 - alpha) + (expressions[key] || 0) * alpha;
       }
@@ -1350,7 +1378,10 @@
 
     const top = LIVE_EXPRESSIONS
       .map((key) => [key, live.smoothed[key] || 0])
-      .sort((a, b) => b[1] - a[1])
+      // Rank by the same weighted score used for the box decision so the bars
+      // never contradict the readout, while the percentage stays the model's
+      // raw estimate.
+      .sort((a, b) => (b[1] * (LIVE_WEIGHT[b[0]] || 1)) - (a[1] * (LIVE_WEIGHT[a[0]] || 1)))
       .slice(0, 3);
     $("#liveExpressionBars").innerHTML = top.map(([key, value]) => {
       const color = LIVE_RED.has(key) ? LIVE_ALERT : LIVE_CALM;
@@ -1377,6 +1408,8 @@
 
   function resetLiveReadout({ idleText = "Waiting for camera", idleClass = "idle" } = {}) {
     live.smoothed = null;
+    live.smoothedAt = 0;
+    live.missedRuns = 0;
     $("#liveMood").textContent = "—";
     setLiveState(idleClass, idleText);
     $("#liveExpressionBars").innerHTML = "";
